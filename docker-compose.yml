@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  parser-bot:
+    build: .
+    container_name: AiBiographer
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./:/app
+
+  web-uploader:
+    build: .
+    container_name: AiBiographer_Web
+    restart: unless-stopped
+    command: python -u web_server.py
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./:/app
