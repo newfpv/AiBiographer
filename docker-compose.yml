@@ -15,7 +15,7 @@ services:
     build: .
     container_name: AiBiographer_Web
     restart: unless-stopped
-    command: python -u web_server.py
+    command: python -u main.py web
     ports:
       - "5000:5000"
     env_file:
