@@ -189,89 +189,129 @@ class TwinBotApp:
 
         @self.bot.callback_query_handler(func=lambda c: True)
         def on_callback(call):
-            chat_id = call.message.chat.id
-            state = self.sessions.get(chat_id)
-            logger.info("event_callback chat_id=%s data=%s mode=%s", chat_id, call.data, state.ui_mode)
-
+            callback_handled = False
             try:
+                chat_id = call.message.chat.id if call.message and call.message.chat else call.from_user.id
+                state = self.sessions.get(chat_id)
+                logger.info("event_callback chat_id=%s data=%s mode=%s", chat_id, call.data, state.ui_mode)
+
+                if not call.data:
+                    logger.warning("callback_without_data chat_id=%s", chat_id)
+                    callback_handled = True
+                    return
+
                 if call.data == "refresh":
                     state.ui_mode = "home"
                     self.render_home(chat_id)
+                    callback_handled = True
                 elif call.data == "add_key":
                     state.ui_mode = "await_key"
                     self.render_home(chat_id, notice=t("ui.ask_key", locale=state.lang))
+                    callback_handled = True
                 elif call.data == "revoke_key":
                     self.access.revoke_key(chat_id)
                     state.ui_mode = "await_key"
                     state.loaded_export = None
                     self.render_home(chat_id, notice=t("ui.key_revoked", locale=state.lang))
+                    callback_handled = True
                 elif call.data == "pick_target":
                     self._show_target_picker(chat_id)
+                    callback_handled = True
                 elif call.data.startswith("target:"):
                     state.selected_target = call.data.split(":", 1)[1]
                     state.ui_mode = "home"
                     self.render_home(chat_id)
+                    callback_handled = True
                 elif call.data == "target_custom":
                     state.ui_mode = "await_target"
                     self.render_home(chat_id, notice=t("ui.ask_target", locale=state.lang))
+                    callback_handled = True
                 elif call.data == "target_top1":
                     self._select_top_target(chat_id)
+                    callback_handled = True
                 elif call.data == "target_me":
                     self._select_top_target(chat_id)
+                    callback_handled = True
                 elif call.data.startswith("module:"):
                     self._start_module(chat_id, call.data.split(":", 1)[1])
+                    callback_handled = True
                 elif call.data.startswith("module_info:"):
                     mid = call.data.split(":", 1)[1]
                     module = self.registry.get(mid)
                     self.render_home(chat_id, notice=f"ℹ️ {module.title}: {module.description}" if module else "Модуль не найден")
+                    callback_handled = True
                 elif call.data == "rerun_last":
                     if state.last_module_id:
                         self._start_module(chat_id, state.last_module_id)
                     else:
                         self.render_home(chat_id, notice="Нет предыдущего запуска")
+                    callback_handled = True
                 elif call.data == "show_draft":
                     self._send_short_preview(chat_id)
+                    callback_handled = True
                 elif call.data == "approve_final":
                     self._send_full_result(chat_id)
+                    callback_handled = True
                 elif call.data == "start_test_prompt":
                     self._start_test_prompt(chat_id)
+                    callback_handled = True
                 elif call.data == "stop_test_prompt":
                     state.test_chat_active = False
                     self.render_home(chat_id, notice="🛑 Тест промпта остановлен")
+                    callback_handled = True
                 elif call.data == "lang_ru":
                     state.lang = "ru"
                     self.render_home(chat_id, notice=t("ui.language_set", locale=state.lang))
+                    callback_handled = True
                 elif call.data == "open_web":
                     self.bot.answer_callback_query(call.id, url=f"{self.settings.base_url}/bots/upload?user_id={chat_id}")
+                    callback_handled = True
                     return
                 elif call.data == "admin_panel" and chat_id == self.settings.admin_id:
                     logger.info("admin_panel_open chat_id=%s", chat_id)
                     self._open_admin_panel(chat_id)
+                    callback_handled = True
                 elif call.data == "admin_keys" and chat_id == self.settings.admin_id:
                     logger.info("admin_keys_open chat_id=%s", chat_id)
                     self._show_all_keys(chat_id)
+                    callback_handled = True
                 elif call.data == "admin_models" and chat_id == self.settings.admin_id:
                     logger.info("admin_models_open chat_id=%s", chat_id)
                     self._show_models(chat_id)
+                    callback_handled = True
                 elif call.data == "admin_set_models" and chat_id == self.settings.admin_id:
                     logger.info("admin_models_set_mode chat_id=%s", chat_id)
                     state.ui_mode = "await_models"
                     self.render_home(chat_id, notice="Введите модели через запятую")
+                    callback_handled = True
                 elif call.data == "admin_set_free_models" and chat_id == self.settings.admin_id:
                     logger.info("admin_models_set_free chat_id=%s", chat_id)
                     self.engine.set_models(DEFAULT_FREE_MODELS)
                     self.render_home(chat_id, notice="✅ Установлены бесплатные модели")
+                    callback_handled = True
                 elif call.data.startswith("admin_") and chat_id != self.settings.admin_id:
                     logger.warning("admin_action_denied chat_id=%s action=%s admin_id_cfg=%s", chat_id, call.data, self.settings.admin_id)
                     self.render_home(chat_id, notice="⛔ У вас нет доступа к админ-панели")
+                    callback_handled = True
+                else:
+                    logger.warning("callback_unhandled chat_id=%s data=%s", chat_id, call.data)
+                    self.render_home(chat_id, notice="⚠️ Кнопка не распознана, обновите меню")
+                    callback_handled = True
             except Exception as e:
-                logger.exception("callback_failed chat_id=%s data=%s", chat_id, call.data)
-                self.render_home(chat_id, notice=f"❌ Ошибка кнопки: {e}")
+                safe_data = getattr(call, "data", "<none>")
+                safe_chat_id = call.from_user.id if call and call.from_user else 0
+                logger.exception("callback_failed chat_id=%s data=%s", safe_chat_id, safe_data)
+                try:
+                    self.render_home(safe_chat_id, notice=f"❌ Ошибка кнопки: {e}")
+                except Exception:
+                    logger.exception("callback_error_render_failed chat_id=%s", safe_chat_id)
             finally:
                 try:
+                    if not callback_handled:
+                        logger.warning("callback_not_handled_before_answer data=%s", getattr(call, "data", "<none>"))
                     self.bot.answer_callback_query(call.id)
                 except Exception:
-                    pass
+                    logger.exception("callback_answer_failed data=%s", getattr(call, "data", "<none>"))
 
     def _try_attach_web_upload(self, chat_id: int) -> None:
         state = self.sessions.get(chat_id)
@@ -596,6 +636,7 @@ class TwinBotApp:
                     timeout=60,
                     long_polling_timeout=60,
                     skip_pending=True,
+                    allowed_updates=["message", "callback_query"],
                 )
             except apihelper.ApiTelegramException as e:
                 err = str(e)
