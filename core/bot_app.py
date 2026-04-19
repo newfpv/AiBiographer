@@ -79,6 +79,13 @@ class TwinBotApp:
         self._register_handlers()
         logger.info("twin_bot_initialized admin_id=%s default_lang=%s", settings.admin_id, settings.default_lang)
 
+    def _safe_delete_user_message(self, chat_id: int, message_id: int, reason: str) -> None:
+        try:
+            self.bot.delete_message(chat_id, message_id)
+            logger.info("user_message_deleted chat_id=%s message_id=%s reason=%s", chat_id, message_id, reason)
+        except Exception:
+            logger.warning("user_message_delete_failed chat_id=%s message_id=%s reason=%s", chat_id, message_id, reason)
+
     def _bootstrap_saved_keys_into_pool(self) -> None:
         loaded = 0
         for _, key in self.access.list_active_keys():
@@ -118,6 +125,14 @@ class TwinBotApp:
                 notice="/start: 1) введите ключ 2) загрузите чат 3) выберите цель 4) выберите модуль",
             )
 
+        @self.bot.message_handler(commands=["admin"])
+        def admin_open(message):
+            logger.info("event_admin_command chat_id=%s admin_id_cfg=%s", message.chat.id, self.settings.admin_id)
+            if message.chat.id != self.settings.admin_id:
+                self.render_home(message.chat.id, notice="⛔ У вас нет доступа к админ-панели")
+                return
+            self._open_admin_panel(message.chat.id)
+
         @self.bot.message_handler(content_types=["document"])
         def handle_doc(message):
             logger.info("event_document chat_id=%s filename=%s", message.chat.id, message.document.file_name)
@@ -125,6 +140,7 @@ class TwinBotApp:
             ext = (message.document.file_name or "").lower()
             if not (ext.endswith(".json") or ext.endswith(".zip")):
                 self.render_home(message.chat.id, notice="❌ Нужен .json или .zip")
+                self._safe_delete_user_message(message.chat.id, message.message_id, reason="bad_upload_extension")
                 return
             file_info = self.bot.get_file(message.document.file_id)
             raw = self.bot.download_file(file_info.file_path)
@@ -135,11 +151,13 @@ class TwinBotApp:
             except Exception:
                 logger.exception("upload_parse_failed chat_id=%s", message.chat.id)
                 self.render_home(message.chat.id, notice=t("ui.upload_fail", locale=state.lang))
+                self._safe_delete_user_message(message.chat.id, message.message_id, reason="upload_parse_failed")
                 return
             state.loaded_export = data
             state.upload_path = None
             state.task_status = "idle"
             self.render_home(message.chat.id, notice=t("ui.upload_ok", locale=state.lang))
+            self._safe_delete_user_message(message.chat.id, message.message_id, reason="uploaded_export")
 
         @self.bot.message_handler(func=lambda m: True)
         def text_router(message):
@@ -150,20 +168,24 @@ class TwinBotApp:
                 return
 
             if state.test_chat_active:
+                self._safe_delete_user_message(message.chat.id, message.message_id, reason="test_chat_message")
                 self._process_test_chat_message(message.chat.id, txt)
                 return
 
             if state.ui_mode == "await_key":
                 self._handle_key_input(message.chat.id, txt)
+                self._safe_delete_user_message(message.chat.id, message.message_id, reason="api_key_input")
             elif state.ui_mode == "await_target":
                 state.selected_target = txt
                 state.ui_mode = "home"
                 self.render_home(message.chat.id)
+                self._safe_delete_user_message(message.chat.id, message.message_id, reason="target_input")
             elif state.ui_mode == "await_models" and message.chat.id == self.settings.admin_id:
                 models = [x.strip() for x in txt.split(",") if x.strip()]
                 self.engine.set_models(models)
                 state.ui_mode = "home"
                 self.render_home(message.chat.id, notice="✅ Список моделей обновлен")
+                self._safe_delete_user_message(message.chat.id, message.message_id, reason="admin_models_input")
 
         @self.bot.callback_query_handler(func=lambda c: True)
         def on_callback(call):
@@ -223,17 +245,25 @@ class TwinBotApp:
                     self.bot.answer_callback_query(call.id, url=f"{self.settings.base_url}/bots/upload?user_id={chat_id}")
                     return
                 elif call.data == "admin_panel" and chat_id == self.settings.admin_id:
+                    logger.info("admin_panel_open chat_id=%s", chat_id)
                     self._open_admin_panel(chat_id)
                 elif call.data == "admin_keys" and chat_id == self.settings.admin_id:
+                    logger.info("admin_keys_open chat_id=%s", chat_id)
                     self._show_all_keys(chat_id)
                 elif call.data == "admin_models" and chat_id == self.settings.admin_id:
+                    logger.info("admin_models_open chat_id=%s", chat_id)
                     self._show_models(chat_id)
                 elif call.data == "admin_set_models" and chat_id == self.settings.admin_id:
+                    logger.info("admin_models_set_mode chat_id=%s", chat_id)
                     state.ui_mode = "await_models"
                     self.render_home(chat_id, notice="Введите модели через запятую")
                 elif call.data == "admin_set_free_models" and chat_id == self.settings.admin_id:
+                    logger.info("admin_models_set_free chat_id=%s", chat_id)
                     self.engine.set_models(DEFAULT_FREE_MODELS)
                     self.render_home(chat_id, notice="✅ Установлены бесплатные модели")
+                elif call.data.startswith("admin_") and chat_id != self.settings.admin_id:
+                    logger.warning("admin_action_denied chat_id=%s action=%s admin_id_cfg=%s", chat_id, call.data, self.settings.admin_id)
+                    self.render_home(chat_id, notice="⛔ У вас нет доступа к админ-панели")
             except Exception as e:
                 logger.exception("callback_failed chat_id=%s data=%s", chat_id, call.data)
                 self.render_home(chat_id, notice=f"❌ Ошибка кнопки: {e}")
@@ -386,6 +416,11 @@ class TwinBotApp:
         output.write_text(text, encoding="utf-8")
         with output.open("rb") as f:
             self.bot.send_document(chat_id, f, caption="✅ Финал")
+        try:
+            output.unlink(missing_ok=True)
+            logger.info("final_temp_file_deleted chat_id=%s path=%s", chat_id, output)
+        except Exception:
+            logger.warning("final_temp_file_delete_failed chat_id=%s path=%s", chat_id, output)
         logger.info("final_sent_file chat_id=%s path=%s len=%s", chat_id, output, len(text))
 
     def _start_test_prompt(self, chat_id: int) -> None:
